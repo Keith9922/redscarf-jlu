@@ -7,6 +7,10 @@ import cv2
 import numpy as np
 from PIL import Image
 from pathlib import Path
+import threading
+import time
+from typing import Tuple, Dict, Optional
+import random
 
 from detection_service import RedScarfDetectionService
 from config import GRADIO_SERVER_NAME, GRADIO_SERVER_PORT, GRADIO_SHARE
@@ -19,6 +23,11 @@ class GradioApp:
         """初始化应用"""
         print("[INFO] 正在初始化红领巾检测系统...")
         self.detector = RedScarfDetectionService()
+        self.camera_running = False
+        self.latest_frame = None
+        self.latest_info = None
+        self.praise_message = ""
+        self.last_praise_time = 0
         print("[INFO] 系统初始化完成!")
     
     def detect_image_interface(self, image: np.ndarray):
@@ -105,6 +114,114 @@ class GradioApp:
         
         return result_image_rgb, info_text
     
+    def _generate_praise(self) -> str:
+        """生成鼓励信息"""
+        praise_list = [
+            "🌟 太棒了！正确佩戴红领巾！",
+            "🎉 优秀！标准敬礼姿态！",
+            "⭐ 你是好少年！",
+            "👍 敬礼姿态标准，继续加油！",
+            "🏆 完美的敬礼！",
+            "✨ 红领巾佩戴得很好！",
+            "💪 继续保持这样的好习惯！",
+            "🎓 这就是少先队员的风采！",
+            "👏 敬礼动作棒棒哒！",
+            "🌈 展现红领巾的光彩！",
+        ]
+        return random.choice(praise_list)
+    
+    def camera_detection_interface(self) -> Tuple[Optional[np.ndarray], str]:
+        """
+        摄像头实时检测接口
+        返回当前帧和信息
+        """
+        if self.latest_frame is not None:
+            # 将最新帧转换为RGB用于显示
+            if len(self.latest_frame.shape) == 3 and self.latest_frame.shape[2] == 3:
+                result_image_rgb = cv2.cvtColor(self.latest_frame, cv2.COLOR_BGR2RGB)
+            else:
+                result_image_rgb = self.latest_frame
+            
+            # 生成信息文本
+            if self.latest_info:
+                info = self.latest_info
+                info_text = f"""
+### 实时检测结果
+
+- **检测到的人数**: {info['total_persons']} 人
+- **已佩戴红领巾**: {info['wearing_redscarf']} 人 ✅
+- **未佩戴红领巾**: {info['not_wearing']} 人 ❌
+- **正在敬礼**: {info.get('saluting', 0)} 人 👋
+- **检测速度**: {info['fps']:.2f} FPS
+- **佩戴率**: {(info['wearing_redscarf']/max(info['total_persons'], 1)*100):.1f}%
+"""
+                
+                # 如果检测到正确佩戴红领巾且敬礼，添加鼓励信息
+                if info['wearing_redscarf'] > 0 and info.get('saluting', 0) > 0:
+                    current_time = time.time()
+                    if not self.praise_message or (current_time - self.last_praise_time) > 3:
+                        self.praise_message = self._generate_praise()
+                        self.last_praise_time = current_time
+                    info_text += f"\n---\n### 🎉 鼓励信息\n\n{self.praise_message}"
+                else:
+                    self.praise_message = ""
+                
+                return result_image_rgb, info_text
+        
+        return None, "等待摄像头输入..."
+    
+    def _camera_thread(self, camera_id: int = 0):
+        """摄像头检测线程"""
+        cap = cv2.VideoCapture(camera_id)
+        
+        if not cap.isOpened():
+            print(f"[ERROR] 无法打开摄像头: {camera_id}")
+            self.camera_running = False
+            return
+        
+        print(f"[INFO] 摄像头已启动 (ID: {camera_id})")
+        
+        try:
+            while self.camera_running:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # 检测
+                result_frame, info = self.detector.detect_image(frame)
+                
+                # 更新最新帧和信息
+                self.latest_frame = result_frame
+                self.latest_info = info
+                
+                # 为了避免过度占用CPU，适度延迟
+                time.sleep(0.01)
+        
+        except Exception as e:
+            print(f"[ERROR] 摄像头检测出错: {e}")
+        
+        finally:
+            cap.release()
+            self.camera_running = False
+            print("[INFO] 摄像头已关闭")
+    
+    def start_camera(self, camera_id: int = 0) -> str:
+        """启动摄像头"""
+        if not self.camera_running:
+            self.camera_running = True
+            self.latest_frame = None
+            self.latest_info = None
+            thread = threading.Thread(target=self._camera_thread, args=(int(camera_id),), daemon=True)
+            thread.start()
+            return "✅ 摄像头已启动，实时检测中..."
+        return "⚠️ 摄像头已在运行中"
+    
+    def stop_camera(self) -> str:
+        """停止摄像头"""
+        self.camera_running = False
+        time.sleep(0.5)  # 等待线程关闭
+        return "✅ 摄像头已停止"
+    
     def create_interface(self):
         """创建Gradio界面"""
         
@@ -138,6 +255,93 @@ class GradioApp:
                 """,
                 elem_classes="title"
             )
+            
+            with gr.Tab("🎥 摄像头实时检测"):
+                gr.Markdown("### 实时检测摄像头画面")
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        camera_output = gr.Image(
+                            label="摄像头画面",
+                            type="numpy",
+                            height=400
+                        )
+                        
+                        camera_info = gr.Markdown(
+                            label="检测信息",
+                            value="等待启动..."
+                        )
+                    
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            start_btn = gr.Button(
+                                "▶️ 启动摄像头",
+                                variant="primary",
+                                size="lg"
+                            )
+                            stop_btn = gr.Button(
+                                "⏹️ 停止摄像头",
+                                variant="stop",
+                                size="lg"
+                            )
+                        
+                        camera_id_input = gr.Slider(
+                            label="摄像头ID",
+                            minimum=0,
+                            maximum=5,
+                            value=0,
+                            step=1
+                        )
+                        
+                        status_text = gr.Textbox(
+                            label="状态",
+                            value="就绪",
+                            interactive=False
+                        )
+                        
+                        gr.Markdown(
+                            """
+                            **使用说明**:
+                            1. 设置摄像头ID（通常为0）
+                            2. 点击"启动摄像头"开始实时检测
+                            3. 系统会自动检测红领巾佩戴和敬礼姿态
+                            4. 点击"停止摄像头"结束检测
+                            
+                            **检测结果说明**:
+                            - 🟢 绿色框 = 已佩戴红领巾
+                            - 🔴 红色框 = 未佩戴红领巾
+                            - 🟣 紫色框 = 标准敬礼姿态
+                            - 🟡 骨架线 = 人体关键点
+                            
+                            **鼓励机制**:
+                            当检测到用户正确佩戴红领巾且做出敬礼动作时，系统会给出鼓励提示！
+                            """
+                        )
+                
+                # 定时更新
+                def update_camera():
+                    result, info = self.camera_detection_interface()
+                    return result, info
+                
+                # 使用定时器持续更新（每100ms）
+                timer = gr.Textbox(visible=False)
+                timer.change(
+                    fn=update_camera,
+                    outputs=[camera_output, camera_info],
+                    every=0.1
+                )
+                
+                # 绑定按钮事件
+                start_btn.click(
+                    fn=self.start_camera,
+                    inputs=[camera_id_input],
+                    outputs=[status_text]
+                )
+                
+                stop_btn.click(
+                    fn=self.stop_camera,
+                    outputs=[status_text]
+                )
             
             with gr.Tab("📷 图片检测"):
                 gr.Markdown("### 上传图片进行检测")
@@ -209,11 +413,13 @@ class GradioApp:
                     - ✅ 实时处理反馈
                     - ✅ 可视化结果展示
                     - ✅ 统计信息输出
+                    - ✅ 摄像头实时检测
+                    - ✅ 智能鼓励提示
                     
                     ### 技术架构
                     - **目标检测**: YOLOv8
                     - **姿态识别**: YOLOv8-Pose
-                    - **推理加速**: OpenVINO
+                    - **推理加速**: OpenVINO (可选)
                     - **Web框架**: Gradio
                     - **图像处理**: OpenCV
                     
@@ -231,21 +437,28 @@ class GradioApp:
                     - 手肘抬起高于肩膀
                     - 综合得分超过60分（标准85+分）
                     
+                    ### 摄像头检测说明
+                    - 支持多个摄像头输入（通过摄像头ID选择）
+                    - 实时处理视频流，每帧进行目标检测和姿态识别
+                    - 当检测到正确佩戴红领巾且敬礼时，自动生成随机鼓励信息
+                    - 鼓励信息每3秒更新一次，防止重复
+                    
                     ### 使用场景
                     - 学校日常检查
                     - 活动监督
                     - 敬礼动作训练
                     - 统计分析
                     - 自动化管理
+                    - 教室/集会实时监控
                     
                     ### 开发信息
-                    - **版本**: v3.0 (新增敬礼检测)
+                    - **版本**: v4.0 (新增摄像头实时检测+鼓励提示)
                     - **更新日期**: 2024
                     - **开发者**: Vicwxy Wangxinyu & AI Assistant
                     
                     ---
                     
-                    💡 **提示**: 为获得最佳检测效果，建议上传清晰、光线充足的图片，且人物姿态完整可见
+                    💡 **提示**: 为获得最佳检测效果，建议在光线充足的环境中使用，确保摄像头清晰，人物姿态完整可见。
                     """
                 )
         
