@@ -3,6 +3,7 @@
 基于YOLO的红领巾佩戴检测系统，支持实时图像和摄像头检测。
 
 ## 快速启动
+建议先安装一个conda，Anaconda/miniconda都行，主要是可以使用conda管理虚拟环境
 
 ```bash
 # 安装依赖
