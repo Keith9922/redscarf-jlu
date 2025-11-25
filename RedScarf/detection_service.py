@@ -209,7 +209,11 @@ class RedScarfDetectionService:
                         # 匹配当前人体框与姿态检测结果
                         matched_pose = self._match_person_to_pose(xyxy, pose_detections)
                         if matched_pose:
-                            salute_info = self.salute_detector.detect_salute(matched_pose['keypoints'])
+                            # 传递图像用于手掌检测
+                            salute_info = self.salute_detector.detect_salute(
+                                matched_pose['keypoints'], 
+                                image=image  # 添加图像参数
+                            )
                             if salute_info['is_saluting']:
                                 salute_count += 1
                             salute_results.append(salute_info)

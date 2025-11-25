@@ -11,6 +11,12 @@ import threading
 import time
 from typing import Tuple, Dict, Optional
 import random
+import os
+import sys
+
+# macOS OpenCV摄像头权限处理
+if sys.platform == 'darwin':
+    os.environ['OPENCV_AVFOUNDATION_SKIP_AUTH'] = '1'
 
 from detection_service import RedScarfDetectionService
 from config import GRADIO_SERVER_NAME, GRADIO_SERVER_PORT, GRADIO_SHARE
@@ -168,42 +174,65 @@ class GradioApp:
                 
                 return result_image_rgb, info_text
         
+        # 如果摄像头正在启动中
+        if self.camera_running:
+            return None, "⏳ 摄像头启动中，请稍候...\n\nmacOS用户：\n- 首次使用需要在系统偏好设置中授予摄像头权限\n- 如果仍然无法工作，请检查是否有其他应用占用摄像头\n- 尝试更改摄像头ID（如改为1）"
+        
         return None, "等待摄像头输入..."
     
     def _camera_thread(self, camera_id: int = 0):
         """摄像头检测线程"""
-        cap = cv2.VideoCapture(camera_id)
-        
-        if not cap.isOpened():
-            print(f"[ERROR] 无法打开摄像头: {camera_id}")
-            self.camera_running = False
-            return
-        
-        print(f"[INFO] 摄像头已启动 (ID: {camera_id})")
-        
         try:
-            while self.camera_running:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                # 检测
-                result_frame, info = self.detector.detect_image(frame)
-                
-                # 更新最新帧和信息
-                self.latest_frame = result_frame
-                self.latest_info = info
-                
-                # 为了避免过度占用CPU，适度延迟
-                time.sleep(0.01)
+            print(f"[INFO] 摄像头线程启动，开始初始化摄像头 {camera_id}...")
+            cap = cv2.VideoCapture(camera_id)
+            
+            # 增加初始化超时
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            if not cap.isOpened():
+                print(f"[ERROR] 无法打开摄像头: {camera_id}")
+                print(f"[HELP] macOS用户请确保：")
+                print(f"      1. 已在系统偏好设置中授予摄像头权限")
+                print(f"      2. 没有其他应用占用摄像头")
+                print(f"      3. 尝试更改摄像头ID（如改为1）")
+                self.camera_running = False
+                return
+            
+            print(f"[INFO] 摄像头已启动 (ID: {camera_id})")
+            
+            frame_count = 0
+            try:
+                while self.camera_running:
+                    ret, frame = cap.read()
+                    if not ret:
+                        print(f"[WARNING] 无法读取摄像头帧")
+                        break
+                    
+                    # 检测
+                    result_frame, info = self.detector.detect_image(frame)
+                    
+                    # 更新最新帧和信息
+                    self.latest_frame = result_frame
+                    self.latest_info = info
+                    
+                    frame_count += 1
+                    if frame_count % 30 == 0:
+                        print(f"[INFO] 摄像头运行中... 已处理 {frame_count} 帧")
+                    
+                    # 为了避免过度占用CPU，适度延迟
+                    time.sleep(0.01)
+            
+            except Exception as e:
+                print(f"[ERROR] 摄像头检测出错: {e}")
+            
+            finally:
+                cap.release()
+                self.camera_running = False
+                print(f"[INFO] 摄像头已关闭，共处理 {frame_count} 帧")
         
         except Exception as e:
-            print(f"[ERROR] 摄像头检测出错: {e}")
-        
-        finally:
-            cap.release()
+            print(f"[ERROR] 摄像头线程异常: {e}")
             self.camera_running = False
-            print("[INFO] 摄像头已关闭")
     
     def start_camera(self, camera_id: int = 0) -> str:
         """启动摄像头"""
@@ -211,9 +240,11 @@ class GradioApp:
             self.camera_running = True
             self.latest_frame = None
             self.latest_info = None
+            print(f"\n[INFO] 正在启动摄像头 {int(camera_id)}...")
             thread = threading.Thread(target=self._camera_thread, args=(int(camera_id),), daemon=True)
             thread.start()
-            return "✅ 摄像头已启动，实时检测中..."
+            print(f"[INFO] 摄像头启动线程已创建")
+            return "⏳ 摄像头启动中，请稍候..."
         return "⚠️ 摄像头已在运行中"
     
     def stop_camera(self) -> str:
@@ -318,17 +349,16 @@ class GradioApp:
                             """
                         )
                 
-                # 定时更新
+                # 定时更新函数
                 def update_camera():
                     result, info = self.camera_detection_interface()
                     return result, info
                 
-                # 使用定时器持续更新（每100ms）
-                timer = gr.Textbox(visible=False)
-                timer.change(
+                # 使用Timer组件持续更新（每100ms）
+                timer = gr.Timer(value=0.1)
+                timer.tick(
                     fn=update_camera,
-                    outputs=[camera_output, camera_info],
-                    every=0.1
+                    outputs=[camera_output, camera_info]
                 )
                 
                 # 绑定按钮事件
@@ -342,6 +372,7 @@ class GradioApp:
                     fn=self.stop_camera,
                     outputs=[status_text]
                 )
+            
             
             with gr.Tab("📷 图片检测"):
                 gr.Markdown("### 上传图片进行检测")

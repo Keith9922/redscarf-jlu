@@ -12,10 +12,10 @@ REDSCARF_MODEL_NAME = "redscarf"
 POSE_MODEL_NAME = "yolov8n-pose"  # YOLOv8-Pose模型
 DEVICE = "CPU"  # 可选: CPU, GPU
 
-# 模型路径
-PERSON_MODEL_PATH = ROOT_DIR / f"models/{PERSON_MODEL_NAME}_openvino_model/{PERSON_MODEL_NAME}.xml"
-REDSCARF_MODEL_PATH = ROOT_DIR / f"models/{REDSCARF_MODEL_NAME}_openvino_model/{REDSCARF_MODEL_NAME}.xml"
-POSE_MODEL_PATH = ROOT_DIR / "yolov8n-pose.pt"  # YOLOv8-Pose模型路径
+# 模型路径 (使用PyTorch格式)
+PERSON_MODEL_PATH = ROOT_DIR / "yolov8n.pt"
+REDSCARF_MODEL_PATH = ROOT_DIR / "yolov8n.pt"
+POSE_MODEL_PATH = ROOT_DIR / "yolov8n-pose.pt"
 
 # 检测参数
 PERSON_CONF_THRESHOLD = 0.5      # 人体检测置信度阈值
@@ -23,6 +23,7 @@ REDSCARF_CONF_THRESHOLD = 0.45    # 红领巾检测置信度阈值 (混合色彩
 POSE_CONF_THRESHOLD = 0.5        # 姿态检测置信度阈值
 NMS_IOU_THRESHOLD = 0.7          # NMS IOU阈值
 MAX_DETECTIONS = 300             # 最大检测数量
+REDSCARF_COLOR_FILTER = True      # 是否启用红色色彩过滤
 
 # 红领巾佩戴判断参数
 REDSCARF_IOU_THRESHOLD = 0.05    # 红领巾与人体框IoU阈值 (允许灵活匹配)

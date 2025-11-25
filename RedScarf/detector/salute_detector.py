@@ -1,10 +1,11 @@
 """
-敬礼检测模块 - 基于关键点的敬礼姿态识别
+敬礼检测模块 - 基于关键点和手掌检测的敬礼姿态识别
 用于判断小学生敬礼动作是否标准
 """
 import numpy as np
 from typing import Dict, Tuple, Optional
 import math
+import cv2
 
 
 class SaluteDetector:
@@ -13,7 +14,8 @@ class SaluteDetector:
     def __init__(self, 
                  angle_threshold: Tuple[float, float] = (60, 120),
                  hand_head_distance_ratio: float = 0.3,
-                 strict_mode: bool = False):
+                 strict_mode: bool = False,
+                 hand_openness_threshold: float = 0.35):
         """
         初始化敬礼检测器
         
@@ -21,17 +23,20 @@ class SaluteDetector:
             angle_threshold: 手肘角度范围 (最小角度, 最大角度)，单位：度
             hand_head_distance_ratio: 手部到头部的距离比例阈值
             strict_mode: 是否使用严格模式
+            hand_openness_threshold: 手部开放度阈值（<0.35表示五指并拢）
         """
         self.angle_threshold = angle_threshold
         self.hand_head_distance_ratio = hand_head_distance_ratio
         self.strict_mode = strict_mode
+        self.hand_openness_threshold = hand_openness_threshold
     
-    def detect_salute(self, keypoints: np.ndarray) -> Dict:
+    def detect_salute(self, keypoints: np.ndarray, image: Optional[np.ndarray] = None) -> Dict:
         """
         检测敬礼姿态
         
         Args:
             keypoints: 关键点数组 [17, 3] (x, y, confidence)
+            image: 输入图像（可选，用于手掌检测），BGR格式
         
         Returns:
             检测结果字典:
@@ -43,7 +48,9 @@ class SaluteDetector:
                     'hand_position': str,       # 手部位置
                     'elbow_angle': float,       # 手肘角度
                     'hand_height': str,         # 手部高度
-                    'posture': str              # 整体姿态
+                    'posture': str,             # 整体姿态
+                    'hand_openness': float,     # 手部开放度
+                    'palm_quality': str         # 手掌质量评价
                 }
             }
         """
@@ -80,7 +87,8 @@ class SaluteDetector:
             shoulder=left_shoulder,
             head_center=nose,
             ear=left_ear,
-            side='left'
+            side='left',
+            image=image
         )
         
         # 检测右手敬礼
@@ -90,7 +98,8 @@ class SaluteDetector:
             shoulder=right_shoulder,
             head_center=nose,
             ear=right_ear,
-            side='right'
+            side='right',
+            image=image
         )
         
         # 选择得分更高的一侧
@@ -107,7 +116,8 @@ class SaluteDetector:
     
     def _check_single_hand_salute(self, wrist: np.ndarray, elbow: np.ndarray,
                                    shoulder: np.ndarray, head_center: np.ndarray,
-                                   ear: np.ndarray, side: str) -> Dict:
+                                   ear: np.ndarray, side: str, 
+                                   image: Optional[np.ndarray] = None) -> Dict:
         """
         检查单手敬礼姿态
         
@@ -118,6 +128,7 @@ class SaluteDetector:
             head_center: 头部中心点（鼻子）
             ear: 耳朵关键点
             side: 检测侧 ('left' 或 'right')
+            image: 输入图像（可选）
         
         Returns:
             检测结果
@@ -191,9 +202,33 @@ class SaluteDetector:
         if elbow_raised:
             score += 10
         
+        # 新增：手掌检测（可选，需要图像）
+        hand_openness = None
+        palm_quality_score = 0
+        if image is not None:
+            hand_roi, roi_offset = self._extract_hand_roi(
+                image, wrist, elbow, shoulder
+            )
+            if hand_roi is not None and hand_roi.size > 0:
+                openness_result = self._check_hand_openness(hand_roi)
+                if openness_result is not None:
+                    hand_openness = openness_result['openness']
+                    is_closed = openness_result['is_closed']
+                    
+                    # 五指并拢评分 (20分)
+                    if is_closed:
+                        palm_quality_score = 20
+                        score += 20
+                    else:
+                        # 根据开放度线性减分
+                        penalty = openness_result['openness'] * 20
+                        palm_quality_score = max(0, 20 - penalty)
+                        score += palm_quality_score
+        
         # 更新结果
         result['score'] = min(100, score)
         result['side'] = side if score >= 60 else 'none'
+        result['details']['hand_openness'] = hand_openness if hand_openness is not None else 0.0
         
         # 详细信息
         if hand_above_shoulder and hand_near_head:
@@ -208,6 +243,15 @@ class SaluteDetector:
         else:
             result['details']['hand_position'] = '偏离头部'
         
+        # 手掌质量评价
+        if hand_openness is not None:
+            if hand_openness < self.hand_openness_threshold:
+                result['details']['palm_quality'] = '优秀 - 五指并拢 ✅'
+            elif hand_openness < self.hand_openness_threshold + 0.15:
+                result['details']['palm_quality'] = '良好 - 手指基本并拢'
+            else:
+                result['details']['palm_quality'] = '一般 - 手指张开过大'
+        
         # 姿态评价
         if score >= 90:
             result['details']['posture'] = '标准敬礼 ✅'
@@ -219,6 +263,120 @@ class SaluteDetector:
             result['details']['posture'] = '未敬礼或姿态不标准'
         
         return result
+    
+    def _extract_hand_roi(self, image: np.ndarray, wrist: np.ndarray, 
+                         elbow: np.ndarray, shoulder: np.ndarray) -> Tuple[Optional[np.ndarray], Tuple[int, int]]:
+        """
+        从图像中提取手部区域ROI
+        
+        Args:
+            image: 输入图像
+            wrist: 手腕关键点
+            elbow: 手肘关键点
+            shoulder: 肩膀关键点
+        
+        Returns:
+            (hand_roi, roi_offset): 手部区域和偏移量
+        """
+        # 计算手臂长度（肘到手腕的距离）
+        arm_length = np.linalg.norm(elbow[:2] - wrist[:2])
+        
+        if arm_length < 10:  # 手臂长度太小，可能是坏数据
+            return None, (0, 0)
+        
+        # 手部ROI应该是手臂长度的0.4-0.6倍
+        roi_size = arm_length * 0.5
+        
+        # 提取ROI区域（正方形）
+        x1 = max(0, int(wrist[0] - roi_size))
+        y1 = max(0, int(wrist[1] - roi_size))
+        x2 = min(image.shape[1], int(wrist[0] + roi_size))
+        y2 = min(image.shape[0], int(wrist[1] + roi_size))
+        
+        if x1 >= x2 or y1 >= y2:
+            return None, (0, 0)
+        
+        hand_roi = image[y1:y2, x1:x2]
+        return hand_roi, (x1, y1)
+    
+    def _check_hand_openness(self, hand_roi: np.ndarray, 
+                            skin_threshold: float = 0.15) -> Optional[Dict]:
+        """
+        计算手部开放度（Five-Finger Openness）
+        
+        原理：
+        - 使用肤色识别提取手部轮廓
+        - 计算凸包面积与实际手部面积比
+        - 开放度低 = 五指并拢 ✓
+        
+        Args:
+            hand_roi: 手部ROI区域
+            skin_threshold: 肤色阈值
+        
+        Returns:
+            检测结果字典或None
+        """
+        try:
+            if hand_roi.size == 0:
+                return None
+            
+            # 肤色范围定义 (HSV颜色空间)
+            # 扩展范围以覆盖不同肤色
+            lower_skin1 = np.array([0, 10, 60])
+            upper_skin1 = np.array([20, 255, 255])
+            lower_skin2 = np.array([160, 10, 60])
+            upper_skin2 = np.array([180, 255, 255])
+            
+            hsv = cv2.cvtColor(hand_roi, cv2.COLOR_BGR2HSV)
+            
+            # 创建肤色掩码
+            mask1 = cv2.inRange(hsv, lower_skin1, upper_skin1)
+            mask2 = cv2.inRange(hsv, lower_skin2, upper_skin2)
+            skin_mask = cv2.bitwise_or(mask1, mask2)
+            
+            # 形态学操作，去除噪声
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
+            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
+            
+            # 获取手部轮廓
+            contours, _ = cv2.findContours(
+                skin_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            if len(contours) == 0:
+                return None
+            
+            # 最大轮廓应该是手部
+            hand_contour = max(contours, key=cv2.contourArea)
+            hand_area = cv2.contourArea(hand_contour)
+            
+            if hand_area < 50:  # 轮廓太小
+                return None
+            
+            # 计算凸包
+            hull = cv2.convexHull(hand_contour)
+            hull_area = cv2.contourArea(hull)
+            
+            # 开放度 = (凸包面积 - 手部面积) / 凸包面积
+            # 值越小表示手指越并拢
+            if hull_area == 0:
+                openness = 0.0
+            else:
+                openness = (hull_area - hand_area) / hull_area
+            
+            return {
+                'openness': openness,
+                'is_closed': openness < self.hand_openness_threshold,
+                'hand_contour': hand_contour,
+                'hull': hull,
+                'hand_area': hand_area,
+                'hull_area': hull_area
+            }
+        
+        except Exception as e:
+            print(f"[WARNING] 手部检测失败: {e}")
+            return None
     
     def _calculate_angle(self, point1: np.ndarray, point2: np.ndarray, 
                         point3: np.ndarray) -> float:
@@ -276,6 +434,12 @@ class SaluteDetector:
         feedback += f"- 手肘角度: {details['elbow_angle']:.1f}°\n"
         feedback += f"- 手部位置: {details['hand_position']}\n"
         feedback += f"- 手部高度: {details['hand_height']}\n"
-        feedback += f"- 整体评价: {details['posture']}"
+        
+        # 添加手掌质量反馈
+        if details.get('hand_openness', 0) > 0:
+            feedback += f"\n- 手指状态: {details.get('palm_quality', '未检测')}\n"
+            feedback += f"  (开放度: {details['hand_openness']:.2f})"
+        
+        feedback += f"\n- 整体评价: {details['posture']}"
         
         return feedback
