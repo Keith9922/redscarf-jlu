@@ -205,22 +205,18 @@ python download_pose_model.py
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r RedScarf/requirements.txt
 ```
 
-**Q2: 摄像头无法打开？**
-- 检查摄像头权限（macOS需要在系统设置中授权）
-- 尝试不同的摄像头ID：0, 1, 2...
-- 确认没有其他程序占用摄像头
 
-**Q3: 检测速度慢？**
+**Q2: 检测速度慢？**
 - CPU模式下正常，约15-25 FPS
 - 如有NVIDIA GPU，设置 `DEVICE = "GPU"`
 - 降低输入图像分辨率
 
-**Q4: 红领巾误检或漏检？**
+**Q3: 红领巾误检或漏检？**
 - 调整 `REDSCARF_CONF_THRESHOLD` (0.3-0.6)
 - 确保光线充足，红领巾颜色鲜艳
 - 避免背景中有大面积红色物体
 
-**Q5: 禁用敬礼检测？**
+**Q4: 禁用敬礼检测？**
 ```bash
 # 删除姿态模型文件
 rm RedScarf/yolov8n-pose.pt
@@ -238,7 +234,3 @@ rm RedScarf/yolov8n-pose.pt
 ## 📄 开源协议
 
 Apache License 2.0 - 详见 `RedScarf/LICENSE`
-
----
-
-**开发**: 傅雷中学王新语 | **技术支持**: AI辅助开发 | **更新**: 2024年11月
